@@ -4,9 +4,9 @@ import sqlite3, os, json
 
 # ---------------- CONFIG ---------------- #
 
-DB_PATH = "drivers.db"
-ACTIVE_FILE = "current_driver.json"
-RECORDS_DIR = "records"
+DB_PATH = "/tmp/drivers.db"   # ✅ REQUIRED FOR RENDER
+ACTIVE_FILE = "/tmp/current_driver.json"
+RECORDS_DIR = "/tmp/records"
 
 app = Flask(__name__)
 app.secret_key = "change-me"
@@ -16,7 +16,7 @@ os.makedirs(RECORDS_DIR, exist_ok=True)
 # ---------------- DATABASE ---------------- #
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -43,9 +43,8 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ✅ CORRECT INITIALIZATION FOR RENDER / GUNICORN
-with app.app_context():
-    init_db()
+# ✅ SAFE INITIALIZATION FOR GUNICORN
+init_db()
 
 # ---------------- SESSION HELPERS ---------------- #
 
@@ -115,31 +114,6 @@ def logout():
     clear_active_driver()
     return redirect(url_for("login"))
 
-# ---------------- SAFETY SCORE ---------------- #
-
-def safety_percent_for(driver_id):
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT ts FROM events WHERE driver_id=?", (driver_id,))
-    timestamps = [row["ts"] for row in c.fetchall()]
-    conn.close()
-
-    now = time.time()
-    score_raw = 0.0
-
-    for ts in timestamps:
-        try:
-            event_time = time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
-            days_ago = (now - event_time) / (60 * 60 * 24)
-            weight = max(0.0, 1.0 - days_ago / 30.0)
-            score_raw += weight
-        except:
-            continue
-
-    max_score = 30.0
-    score = max(0.0, 100.0 * (1.0 - score_raw / max_score))
-    return round(score, 1), len(timestamps), round(score_raw, 1)
-
 # ---------------- DASHBOARD ---------------- #
 
 @app.route("/dashboard")
@@ -154,57 +128,11 @@ def dashboard():
     c = conn.cursor()
     c.execute("SELECT * FROM events WHERE driver_id=? ORDER BY id DESC LIMIT 50", (driver_id,))
     events = c.fetchall()
-    safety, total_events, weighted_events = safety_percent_for(driver_id)
     conn.close()
 
-    return render_template(
-        "dashboard.html",
-        name=driver_name,
-        safety=safety,
-        total_events=total_events,
-        weighted_events=weighted_events,
-        events=events
-    )
+    return render_template("dashboard.html", name=driver_name, events=events)
 
-@app.route("/passenger", methods=["GET", "POST"])
-def passenger():
-    data = None
-    error = None
-
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT id, name FROM drivers")
-    all_drivers = c.fetchall()
-
-    if request.method == "POST":
-        driver_id = request.form.get("driver_id", "").strip()
-        if driver_id.isdigit():
-            driver_id = int(driver_id)
-            c.execute("SELECT * FROM drivers WHERE id=?", (driver_id,))
-            d = c.fetchone()
-            if d:
-                safety, total_events, weighted_events = safety_percent_for(driver_id)
-                data = {
-                    "driver": d,
-                    "safety": safety,
-                    "total": total_events,
-                    "avg": weighted_events
-                }
-                c.execute("SELECT * FROM events WHERE driver_id=? ORDER BY id DESC LIMIT 5", (driver_id,))
-                data["events"] = c.fetchall()
-            else:
-                error = "Driver ID not found."
-        else:
-            error = "Enter a numeric Driver ID."
-
-    conn.close()
-    return render_template("passenger.html", data=data, error=error, all_drivers=all_drivers)
-
-@app.route("/records/<path:filename>")
-def records_static(filename):
-    return send_from_directory(RECORDS_DIR, filename)
-
-# ---------------- API FOR LOCAL DETECTION ---------------- #
+# ---------------- API ---------------- #
 
 @app.route("/api/event", methods=["POST"])
 def api_event():
@@ -222,5 +150,4 @@ def api_event():
 # ---------------- LOCAL RUN ---------------- #
 
 if __name__ == "__main__":
-    init_db()
     app.run(debug=True)
