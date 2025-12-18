@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Driver Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    img.snapshot { width: 100px; height: auto; border-radius: 8px; }
+    button {
+      padding: 10px 20px;
+      margin: 10px;
+      font-size: 16px;
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+    }
+    .start-btn { background-color: #28a745; color: white; }
+    .stop-btn { background-color: #dc3545; color: white; }
+    #status { font-weight: bold; margin-top: 10px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Welcome, {{ name }}</h1>
+  <p>Your Driver ID: <strong>{{ session['driver_id'] }}</strong></p>
+  <nav>
+    <a href="{{ url_for('passenger') }}">Passenger View</a>
+    <a class="danger" href="{{ url_for('logout') }}">Logout</a>
+  </nav>
+</header>
+
+<div class="grid">
+  <div class="tile">
+    <h2>Safety Score</h2>
+    <div class="score">{{ safety }}%</div>
+    <p>Total Alerts: {{ total_events }} | Weighted (last 30 days): {{ weighted_events }}</p>
+    <p class="hint">Recent alerts have more impact. Older alerts fade over time.</p>
+  </div>
+
+  <div class="tile" style="border:2px solid #00e0b8;">
+    <h2>Drowsiness Detection Control</h2>
+    <button class="start-btn" onclick="start()">🚗 Start Detection</button>
+    <button class="stop-btn" onclick="stop()">🛑 Stop Detection</button>
+    <p id="status" style="color:#00e0b8;">Status: waiting...</p>
+    <p class="hint">Click Start to begin detection. Stop to end session.</p>
+  </div>
+</div>
+
+<h2>Recent Events</h2>
+<table>
+  <tr><th>Type</th><th>Time</th><th>Snapshot</th></tr>
+  {% for e in events %}
+  <tr>
+    <td>{{ e['event_type'] }}</td>
+    <td>{{ e['ts'] }}</td>
+    <td>
+      {% if e['image_path'] %}
+        <a href="/{{ e['image_path'] }}" target="_blank">
+          <img class="snapshot" src="/{{ e['image_path'] }}" alt="snapshot">
+        </a>
+      {% else %}
+        -
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<script>
+async function start() {
+  const res = await fetch('/start');
+  const data = await res.json();
+  document.getElementById('status').innerText = "Status: " + data.status;
+}
+
+async function stop() {
+  const res = await fetch('/stop');
+  const data = await res.json();
+  document.getElementById('status').innerText = "Status: " + data.status;
+}
+</script>
+
+<style>
+  .btn {
+    background: #10b981;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    margin: 5px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+  }
+  .btn:hover { opacity: 0.8; }
+</style>
+</body>
+</html>
