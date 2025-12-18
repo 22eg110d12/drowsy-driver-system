@@ -132,6 +132,46 @@ def dashboard():
 
     return render_template("dashboard.html", name=driver_name, events=events)
 
+
+@app.route("/passenger", methods=["GET", "POST"])
+def passenger():
+    data = None
+    error = None
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM drivers")
+    all_drivers = c.fetchall()
+
+    if request.method == "POST":
+        driver_id = request.form.get("driver_id", "").strip()
+        if driver_id.isdigit():
+            driver_id = int(driver_id)
+            c.execute("SELECT * FROM drivers WHERE id=?", (driver_id,))
+            d = c.fetchone()
+            if d:
+                c.execute(
+                    "SELECT * FROM events WHERE driver_id=? ORDER BY id DESC LIMIT 5",
+                    (driver_id,)
+                )
+                data = {
+                    "driver": d,
+                    "events": c.fetchall()
+                }
+            else:
+                error = "Driver ID not found."
+        else:
+            error = "Enter a numeric Driver ID."
+
+    conn.close()
+    return render_template(
+        "passenger.html",
+        data=data,
+        error=error,
+        all_drivers=all_drivers
+    )
+
+
 # ---------------- API ---------------- #
 
 @app.route("/api/event", methods=["POST"])
