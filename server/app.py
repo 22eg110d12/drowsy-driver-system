@@ -43,9 +43,8 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 🔴 IMPORTANT FOR RENDER / GUNICORN
-@app.before_first_request
-def setup():
+# ✅ CORRECT INITIALIZATION FOR RENDER / GUNICORN
+with app.app_context():
     init_db()
 
 # ---------------- SESSION HELPERS ---------------- #
@@ -220,7 +219,7 @@ def api_event():
     conn.close()
     return jsonify({"status": "ok"})
 
-# ---------------- LOCAL RUN (OPTIONAL) ---------------- #
+# ---------------- LOCAL RUN ---------------- #
 
 if __name__ == "__main__":
     init_db()
