@@ -1,21 +1,30 @@
-# Virtual environment
+# Virtual environments
 .venv/
 venv/
+env/
 
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
 
-# Datasets
+# Datasets (training data)
 dataset/
 data/
 
-# Large model / binary files
+# ML models & large binaries
 *.h5
+*.keras
 *.dat
 *.dll
 *.pyd
+*.so
 
-# OS files
+# Logs & runtime files
+*.log
+
+# OS / editor files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/

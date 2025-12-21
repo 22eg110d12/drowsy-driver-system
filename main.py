@@ -1,186 +1,245 @@
-import cv2
-import mediapipe as mp
 import time
 import sqlite3
-import numpy as np
 import os
 import json
-import pygame
-import threading
-from tensorflow.keras.models import load_model
+from flask import (
+    Flask, render_template, request, redirect,
+    url_for, session, send_from_directory,
+    flash, jsonify
+)
 
-# Paths and constants
 DB_PATH = "drivers.db"
 ACTIVE_FILE = "current_driver.json"
 RECORDS_DIR = "records"
-ALERT_SOUND = "alert.wav"
-MODEL_PATH = "model.h5"
 
-last_alert_time = 0
-ALERT_COOLDOWN = 10  # seconds
-alert_count = 0
-MAX_VOLUME = 1.0
-MIN_VOLUME = 0.2
-RESET_THRESHOLD = 30  # seconds of silence to reset alert count
-EYE_AR_THRESH = 0.21
-EYE_AR_CONSEC_FRAMES = 20
-MAR_THRESH = 0.6
-COUNTER = 0
+app = Flask(__name__)
+app.secret_key = "change-me"  # change later in production
 
 os.makedirs(RECORDS_DIR, exist_ok=True)
 
-def get_active_driver_id():
-    if os.path.exists(ACTIVE_FILE):
-        with open(ACTIVE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data.get("driver_id")
-    return None
+# ---------------- DATABASE ---------------- #
 
 def db():
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-pygame.mixer.init()
+def init_db():
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS drivers(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            license_number TEXT UNIQUE,
+            email TEXT
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            driver_id INTEGER,
+            event_type TEXT,
+            ts TEXT,
+            image_path TEXT
+        );
+    """)
+    conn.commit()
+    conn.close()
 
-def play_alert_sound(volume=1.0, duration=3):
-    try:
-        sound = pygame.mixer.Sound(ALERT_SOUND)
-        sound.set_volume(volume)
-        channel = sound.play()
+# ---------------- SESSION HELPERS ---------------- #
 
-        def stop_sound():
-            time.sleep(duration)
-            if channel.get_busy():
-                channel.stop()
+def set_active_driver(driver_id):
+    with open(ACTIVE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"driver_id": driver_id}, f)
 
-        threading.Thread(target=stop_sound, daemon=True).start()
-    except Exception as e:
-        print(f"[ERROR] Could not play sound: {e}")
+def clear_active_driver():
+    if os.path.exists(ACTIVE_FILE):
+        os.remove(ACTIVE_FILE)
 
-def eye_aspect_ratio(landmarks, eye_indices):
-    A = np.linalg.norm(landmarks[eye_indices[1]] - landmarks[eye_indices[5]])
-    B = np.linalg.norm(landmarks[eye_indices[2]] - landmarks[eye_indices[4]])
-    C = np.linalg.norm(landmarks[eye_indices[0]] - landmarks[eye_indices[3]])
-    return (A + B) / (2.0 * C)
+# ---------------- ROUTES ---------------- #
 
-def mouth_aspect_ratio(landmarks):
-    vertical = np.linalg.norm(landmarks[13] - landmarks[14])
-    horizontal = np.linalg.norm(landmarks[78] - landmarks[308])
-    return vertical / horizontal
+@app.route("/")
+def home():
+    if "driver_id" in session:
+        return redirect(url_for("dashboard"))
+    return redirect(url_for("login"))
 
-# Load trained model
-model = load_model(MODEL_PATH)
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        name = request.form["name"].strip()
+        license_number = request.form["license_number"].strip()
+        email = request.form["email"].strip()
 
-# Initialize MediaPipe
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
+        conn = db()
+        c = conn.cursor()
+        try:
+            c.execute(
+                "INSERT INTO drivers(name, license_number, email) VALUES (?,?,?)",
+                (name, license_number, email)
+            )
+            conn.commit()
+            flash("Registration successful. Please login.", "success")
+            return redirect(url_for("login"))
+        except sqlite3.IntegrityError:
+            flash("License number already exists.", "error")
+        finally:
+            conn.close()
 
-print("Starting camera...")
-cap = cv2.VideoCapture(0)
+    return render_template("register.html")
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        license_number = request.form["license_number"].strip()
+        conn = db()
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM drivers WHERE license_number = ?",
+            (license_number,)
+        )
+        row = c.fetchone()
+        conn.close()
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
+        if row:
+            session["driver_id"] = row["id"]
+            session["driver_name"] = row["name"]
+            set_active_driver(row["id"])
+            return redirect(url_for("dashboard"))
 
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            h, w, _ = frame.shape
-            landmarks = np.array([[lm.x * w, lm.y * h] for lm in face_landmarks.landmark])
+        flash("Driver not found. Please register.", "error")
 
-            left_eye_indices = [33, 160, 158, 133, 153, 144]
-            right_eye_indices = [362, 385, 387, 263, 373, 380]
-            mouth_indices = [13, 14, 78, 308]
+    return render_template("login.html")
 
-            leftEAR = eye_aspect_ratio(landmarks, left_eye_indices)
-            rightEAR = eye_aspect_ratio(landmarks, right_eye_indices)
-            ear = (leftEAR + rightEAR) / 2.0
-            mar = mouth_aspect_ratio(landmarks)
+@app.route("/logout")
+def logout():
+    session.clear()
+    clear_active_driver()
+    return redirect(url_for("login"))
 
-            for idx in left_eye_indices + right_eye_indices + mouth_indices:
-                cv2.circle(frame, (int(landmarks[idx][0]), int(landmarks[idx][1])), 2, (0, 255, 0), -1)
+# ---------------- SAFETY SCORE ---------------- #
 
-            print(f"EAR: {ear:.3f}, MAR: {mar:.3f}")
+def safety_percent_for(driver_id):
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT ts FROM events WHERE driver_id=?", (driver_id,))
+    timestamps = [row["ts"] for row in c.fetchall()]
+    conn.close()
 
-            alert_type = None
+    now = time.time()
+    score_raw = 0.0
 
-            # Primary EAR logic
-            if ear < EYE_AR_THRESH:
-                COUNTER += 1
-                if COUNTER >= EYE_AR_CONSEC_FRAMES:
-                    # Use model to confirm drowsiness
-                    x_coords = landmarks[:, 0]
-                    y_coords = landmarks[:, 1]
-                    x1, y1 = int(np.min(x_coords)), int(np.min(y_coords))
-                    x2, y2 = int(np.max(x_coords)), int(np.max(y_coords))
+    for ts in timestamps:
+        try:
+            event_time = time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+            days_ago = (now - event_time) / (60 * 60 * 24)
+            weight = max(0.0, 1.0 - days_ago / 30.0)
+            score_raw += weight
+        except:
+            continue
 
-                    pad = 20
-                    x1 = max(x1 - pad, 0)
-                    y1 = max(y1 - pad, 0)
-                    x2 = min(x2 + pad, w)
-                    y2 = min(y2 + pad, h)
+    max_score = 30.0
+    score = max(0.0, 100.0 * (1.0 - score_raw / max_score))
+    return round(score, 1), len(timestamps), round(score_raw, 1)
 
-                    face_crop = frame[y1:y2, x1:x2]
-                    if face_crop.size != 0:
-                        try:
-                            face_resized = cv2.resize(face_crop, (224, 224))
-                            face_input = face_resized / 255.0
-                            face_input = np.expand_dims(face_input, axis=0)
-                            prediction = model.predict(face_input)[0][0]
-                            print(f"Model Confidence: {prediction:.2f}")
-                            if prediction > 0.7:
-                                alert_type = "drowsiness"
-                        except Exception as e:
-                            print(f"[ERROR] Model prediction failed: {e}")
-                    COUNTER = 0
+# ---------------- DASHBOARD ---------------- #
+
+@app.route("/dashboard")
+def dashboard():
+    if "driver_id" not in session:
+        return redirect(url_for("login"))
+
+    driver_id = session["driver_id"]
+    driver_name = session.get("driver_name", "Driver")
+
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM events WHERE driver_id=? ORDER BY id DESC LIMIT 50",
+        (driver_id,)
+    )
+    events = c.fetchall()
+    safety, total_events, weighted_events = safety_percent_for(driver_id)
+    conn.close()
+
+    return render_template(
+        "dashboard.html",
+        name=driver_name,
+        safety=safety,
+        total_events=total_events,
+        weighted_events=weighted_events,
+        events=events
+    )
+
+@app.route("/passenger", methods=["GET", "POST"])
+def passenger():
+    data = None
+    error = None
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM drivers")
+    all_drivers = c.fetchall()
+
+    if request.method == "POST":
+        driver_id = request.form.get("driver_id", "").strip()
+        if driver_id.isdigit():
+            driver_id = int(driver_id)
+            c.execute("SELECT * FROM drivers WHERE id=?", (driver_id,))
+            d = c.fetchone()
+            if d:
+                safety, total_events, weighted_events = safety_percent_for(driver_id)
+                data = {
+                    "driver": d,
+                    "safety": safety,
+                    "total": total_events,
+                    "avg": weighted_events
+                }
+                c.execute(
+                    "SELECT * FROM events WHERE driver_id=? ORDER BY id DESC LIMIT 5",
+                    (driver_id,)
+                )
+                data["events"] = c.fetchall()
             else:
-                COUNTER = 0
+                error = "Driver ID not found."
+        else:
+            error = "Enter a numeric Driver ID."
 
-            # MAR logic for yawning
-            if mar > MAR_THRESH:
-                alert_type = "yawning"
+    conn.close()
+    return render_template(
+        "passenger.html",
+        data=data,
+        error=error,
+        all_drivers=all_drivers
+    )
 
-            if alert_type:
-                current_time = time.time()
-                if current_time - last_alert_time > ALERT_COOLDOWN:
-                    if current_time - last_alert_time > RESET_THRESHOLD:
-                        alert_count = 0
+@app.route("/records/<path:filename>")
+def records_static(filename):
+    return send_from_directory(RECORDS_DIR, filename)
 
-                    alert_count += 1
-                    volume = min(MIN_VOLUME + 0.2 * alert_count, MAX_VOLUME)
-                    print(f"[ALERT] {alert_type.capitalize()} Detected! Volume: {volume:.2f}")
-                    play_alert_sound(volume)
-                    last_alert_time = current_time
+# ---------------- API FOR DETECTION CLIENT ---------------- #
 
-                    driver_id = get_active_driver_id()
-                    if driver_id:
-                        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                        save_dir = os.path.join(RECORDS_DIR, str(driver_id))
-                        os.makedirs(save_dir, exist_ok=True)
-                        filename = f"event_{int(current_time)}.jpg"
-                        img_path = os.path.join(save_dir, filename)
-                        cv2.imwrite(img_path, frame)
-                        db_image_path = f"{RECORDS_DIR}/{driver_id}/{filename}"
+@app.route("/api/event", methods=["POST"])
+def api_event():
+    data = request.json
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO events(driver_id, event_type, ts, image_path) VALUES (?,?,?,?)",
+        (
+            data["driver_id"],
+            data["event_type"],
+            data["ts"],
+            data.get("image_path")
+        )
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
 
-                        conn = db()
-                        c = conn.cursor()
-                        c.execute("""CREATE TABLE IF NOT EXISTS events (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            driver_id TEXT,
-                            event_type TEXT,
-                            ts TEXT,
-                            image_path TEXT
-                        )""")
-                        c.execute("INSERT INTO events(driver_id, event_type, ts, image_path) VALUES (?,?,?,?)",
-                                  (driver_id, alert_type, ts, db_image_path))
-                        conn.commit()
-                        conn.close()
+# ---------------- RUN ---------------- #
 
-    cv2.imshow("Drowsiness Detection", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    init_db()
+    app.run(debug=True)
